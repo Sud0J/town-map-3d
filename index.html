@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Town Map 3D</title>
+<meta name="description" content="Interactive low-poly 3D town map: cinema, sports centre, tower, bus station, café, bank, library, market and park.">
+<style>
+  :root { --bg:#eef1f6; --panel:#ffffffee; --ink:#1d2433; --muted:#5b6475; --accent:#d9473b; --chip:#f2f4f8; --chipOn:#1d2433; --chipOnInk:#fff; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg:#141821; --panel:#1d2330ee; --ink:#e9edf5; --muted:#9aa4b8; --chip:#2a3242; --chipOn:#e9edf5; --chipOnInk:#141821; }
+  }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--ink); font:15px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; overflow:hidden; }
+  #scene { position:fixed; inset:0; }
+  header { position:fixed; top:12px; left:16px; right:16px; display:flex; flex-wrap:wrap; gap:6px; align-items:center; pointer-events:none; }
+  header h1 { font-size:18px; margin:0 8px 0 0; background:var(--panel); padding:6px 12px; border-radius:10px; pointer-events:auto; }
+  .chip { pointer-events:auto; border:0; background:var(--chip); color:var(--ink); padding:6px 10px; border-radius:999px; font:inherit; font-size:13px; cursor:pointer; box-shadow:0 1px 3px #0002; }
+  .chip.on { background:var(--chipOn); color:var(--chipOnInk); }
+  #info { position:fixed; left:16px; bottom:16px; max-width:min(360px, calc(100vw - 32px)); background:var(--panel); padding:14px 16px; border-radius:14px; box-shadow:0 6px 24px #0003; backdrop-filter:blur(6px); transition:opacity .2s, transform .2s; }
+  #info.hidden { opacity:0; transform:translateY(10px); pointer-events:none; }
+  #info h2 { margin:0 0 4px; font-size:20px; }
+  #info p { margin:0; color:var(--muted); }
+  #info .tag { display:inline-block; margin-top:8px; font-size:12px; color:var(--accent); font-weight:600; }
+  #info button { position:absolute; top:8px; right:10px; border:0; background:none; color:var(--muted); font-size:20px; cursor:pointer; }
+  #hint { position:fixed; right:16px; bottom:16px; font-size:12px; color:var(--muted); background:var(--panel); padding:6px 10px; border-radius:8px; }
+  #tip { position:fixed; pointer-events:none; background:var(--chipOn); color:var(--chipOnInk); padding:3px 8px; border-radius:6px; font-size:13px; transform:translate(-50%,-140%); display:none; white-space:nowrap; }
+  @media (max-width:600px){ #hint{ display:none; } header h1{ font-size:15px; } }
+</style>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.js", "three/addons/": "./vendor/" } }
+</script>
+</head>
+<body>
+<div id="scene"></div>
+<header id="bar"><h1>Our Town</h1></header>
+<div id="tip"></div>
+<div id="info" class="hidden"><button id="close" aria-label="Close">×</button><h2 id="iname"></h2><p id="idesc"></p><span class="tag" id="itag"></span></div>
+<div id="hint">Drag to rotate · Scroll/pinch to zoom · Right-drag to pan · Click a place</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/OrbitControls.js';
+
+// ---------- renderer / scene ----------
+const host = document.getElementById('scene');
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+host.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xdfe9f3);
+scene.fog = new THREE.Fog(0xdfe9f3, 70, 140);
+
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 300);
+const HOME = { pos:new THREE.Vector3(0, 34, 46), target:new THREE.Vector3(0, 0, 0) };
+camera.position.copy(HOME.pos);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.copy(HOME.target);
+controls.enableDamping = true;
+controls.maxPolarAngle = Math.PI * 0.47;
+controls.minDistance = 8; controls.maxDistance = 160;
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0xb8c4a0, 0.9));
+const sun = new THREE.DirectionalLight(0xfff3e0, 1.6);
+sun.position.set(-25, 40, 25);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left:-40, right:40, top:30, bottom:-30, near:1, far:120 });
+scene.add(sun);
+
+// ---------- helpers ----------
+const matCache = {};
+const mat = (c) => matCache[c] ??= new THREE.MeshLambertMaterial({ color:c });
+function box(w,h,d,c,x=0,y=0,z=0,parent){ const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),mat(c)); m.position.set(x,y+h/2,z); m.castShadow=m.receiveShadow=true; parent&&parent.add(m); return m; }
+function cyl(rt,rb,h,c,x,y,z,parent,seg=12){ const m=new THREE.Mesh(new THREE.CylinderGeometry(rt,rb,h,seg),mat(c)); m.position.set(x,y+h/2,z); m.castShadow=true; parent&&parent.add(m); return m; }
+function gable(w,h,d,c,y,parent){ // triangular prism roof along x
+  const s=new THREE.Shape(); s.moveTo(-d/2-0.2,0); s.lineTo(d/2+0.2,0); s.lineTo(0,h); s.closePath();
+  const g=new THREE.ExtrudeGeometry(s,{depth:w+0.4,bevelEnabled:false}); g.translate(0,0,-(w+0.4)/2); g.rotateY(Math.PI/2);
+  const m=new THREE.Mesh(g,mat(c)); m.position.y=y; m.castShadow=true; parent.add(m); return m; }
+function sign(text,w,h,bg,fg,font='bold'){
+  const cv=document.createElement('canvas'); cv.width=512; cv.height=Math.round(512*h/w);
+  const x=cv.getContext('2d'); x.fillStyle=bg; x.fillRect(0,0,cv.width,cv.height);
+  x.fillStyle=fg; x.textAlign='center'; x.textBaseline='middle';
+  let fs=cv.height*0.7; x.font=`${font} ${fs}px system-ui,sans-serif`;
+  while(x.measureText(text).width>cv.width*0.9){ fs-=2; x.font=`${font} ${fs}px system-ui,sans-serif`; }
+  x.fillText(text,cv.width/2,cv.height/2+fs*0.05);
+  const t=new THREE.CanvasTexture(cv); t.colorSpace=THREE.SRGBColorSpace; t.anisotropy=4;
+  return new THREE.Mesh(new THREE.PlaneGeometry(w,h), new THREE.MeshBasicMaterial({map:t}));
+}
+function windows(g,{w,d,cols,rows,y0,dy,ww=0.7,wh=1,c=0xffffff,frame=0x2b3a4a}){
+  for(let r=0;r<rows;r++) for(let i=0;i<cols;i++){
+    const x=-w/2+(i+0.5)*(w/cols), y=y0+r*dy;
+    box(ww+0.16,wh+0.16,0.08,frame,x,y-0.08,d/2+0.02,g);
+    box(ww,wh,0.1,c,x,y,d/2+0.04,g);
+  }
+}
+function person(color,x,z,parent){
+  const g=new THREE.Group(); g.position.set(x,0,z);
+  cyl(0.18,0.25,0.9,color,0,0,0,g,8);
+  const head=new THREE.Mesh(new THREE.SphereGeometry(0.2,10,8),mat(0xf1c6a2)); head.position.y=1.1; head.castShadow=true; g.add(head);
+  parent.add(g); return g;
+}
+function tree(x,z,s=1,parent=scene){
+  const g=new THREE.Group(); g.position.set(x,0,z); g.scale.setScalar(s);
+  cyl(0.25,0.35,1.6,0x6b4a2f,0,0,0,g,8);
+  const top=new THREE.Mesh(new THREE.IcosahedronGeometry(1.6,0),mat(0x2f5d3a)); top.position.y=2.8; top.castShadow=true; g.add(top);
+  parent.add(g); return g;
+}
+
+function makeCar(c){
+  const g=new THREE.Group();
+  box(2,0.6,1,c,0,0.25,0,g); box(1.1,0.5,0.9,0xd8e6f0,-0.1,0.85,0,g);
+  [[-0.65,0.5],[0.65,0.5],[-0.65,-0.5],[0.65,-0.5]].forEach(([x,z])=>cyl(0.22,0.22,0.15,0x222222,x,0,z,g,10).rotation.x=Math.PI/2);
+  g.children.slice(-4).forEach(w=>w.position.y=0.22);
+  return g;
+}
+function makeBus(){
+  const g=new THREE.Group();
+  box(5,1.8,1.8,0x9dd3a8,0,0.35,0,g);
+  box(5.02,0.6,1.82,0xd8eef0,0,1.2,0,g);
+  box(5.04,0.12,1.84,0x6fae80,0,0.9,0,g);
+  [-1.6,1.6].forEach(x=>[-0.9,0.9].forEach(z=>{const w=cyl(0.35,0.35,0.2,0x222222,x,0,z,g,12); w.rotation.x=Math.PI/2; w.position.y=0.35;}));
+  return g;
+}
+
+// ---------- ground & road ----------
+const ground=new THREE.Mesh(new THREE.PlaneGeometry(220,220),mat(0xf3f1ea)); ground.rotation.x=-Math.PI/2; ground.receiveShadow=true; scene.add(ground);
+const road=box(64,0.05,5,0xc9ccd6,0,0,0,scene); road.receiveShadow=true;
+for(let x=-30;x<31;x+=3) box(1.4,0.06,0.18,0xffffff,x,0,0,scene);
+box(64,0.12,1.4,0xf4f5f8,0,0,-3.2,scene); // pavement north
+box(64,0.12,1.4,0xf4f5f8,0,0,3.2,scene);  // pavement south
+// side street between market and park
+box(4,0.05,12,0xc9ccd6,7,0,9.6,scene);
+
+// ---------- places ----------
+const places=[]; // {id,name,desc,tag,group}
+const shoppers=[];
+function place(id,name,desc,tag,x,z,flip,build){
+  const g=new THREE.Group(); g.position.set(x,0,z); if(flip) g.rotation.y=Math.PI;
+  build(g); scene.add(g);
+  const p={id,name,desc,tag,group:g}; g.traverse(o=>o.userData.place=p); places.push(p); return p;
+}
+const NZ=-7.5, SZ=9.5; // north / south rows
+
+place('cinema','Cinema','Watch the latest films here. Look for the yellow sign and the film posters by the door.','Entertainment',-26,NZ,false,g=>{
+  box(7,6,5,0x24262c,0,0,0,g);
+  box(7.4,0.4,5.4,0x18191d,0,6,0,g);
+  const s=sign('CINEMA',5.6,1.2,'#24262c','#f4d35e'); s.position.set(0,5,2.52); g.add(s);
+  box(7.6,0.25,1.4,0xf4d35e,0,2.6,2.9,g); // canopy
+  box(2,2.4,0.1,0x5d7c99,0.8,0,2.52,g); // door
+  const colors=[0x2a63b8,0xe85d75,0xf6c445,0x7cc4a6];
+  colors.forEach((c,i)=>box(0.7,1,0.08,c,-2.6+i*0.8,3.2,2.55,g)); // posters
+  box(1.3,1.8,0.08,0x3a4fb0,-2.3,0.4,2.55,g);
+});
+place('sports','Sports Centre','A swimming pool, gym and a red running track behind the building.','Sport',-17,NZ,false,g=>{
+  box(8,5.4,5.5,0xeef2f8,0,0,0,g);
+  gable(8,0.01,5.5,0xcfd6e2,5.4,g);
+  box(8.2,0.3,5.7,0xbcc6d6,0,5.4,0,g);
+  const s=sign('SPORTS CENTRE',6.4,0.9,'#eef2f8','#2f5fb3'); s.position.set(0,4.5,2.77); g.add(s);
+  windows(g,{w:8,d:5.5,cols:4,rows:2,y0:1.2,dy:1.7});
+  box(2.4,0.7,1.6,0x4c5a6c,0,2.7,3.2,g); // porch roof
+  box(1.8,2.6,0.1,0x2b3a4a,0,0,2.78,g);
+  const track=new THREE.Mesh(new THREE.TorusGeometry(4.2,0.5,6,40),mat(0xd9473b)); track.scale.set(1.25,0.8,1); track.rotation.x=-Math.PI/2; track.position.set(1,0.12,-4.8); g.add(track);
+  const field=new THREE.Mesh(new THREE.CircleGeometry(3.6,32),mat(0x7fb069)); field.scale.set(1.25,0.8,1); field.rotation.x=-Math.PI/2; field.position.set(1,0.06,-4.8); field.receiveShadow=true; g.add(field);
+  // bike out front
+  const wheel=new THREE.TorusGeometry(0.35,0.06,6,16);
+  [-0.4,0.4].forEach(dx=>{const w=new THREE.Mesh(wheel,mat(0xd9473b)); w.position.set(-4.6+dx,0.4,3.4); g.add(w);});
+});
+place('tower','Tower','An old red-brick clock tower with battlements. You can see the whole town from the top!','History',-9,NZ,false,g=>{
+  box(3.6,11,3.6,0xb63a2f,0,0,0,g);
+  for(let i=0;i<4;i++) for(let j=0;j<4;j++) if(i===0||i===3||j===0||j===3) box(0.6,0.8,0.6,0xb63a2f,-1.35+i*0.9,11,-1.35+j*0.9,g);
+  const s=sign('TOWER',2.8,0.6,'#b63a2f','#ffffff'); s.position.set(0,10.1,1.82); g.add(s);
+  [7.5,5].forEach(y=>{box(0.8,1.3,0.1,0xffffff,0,y,1.81,g);});
+  box(1.4,2.4,0.1,0x6b3a2a,0,0,1.81,g);
+  const arch=new THREE.Mesh(new THREE.CircleGeometry(0.7,16,0,Math.PI),mat(0x6b3a2a)); arch.position.set(0,2.4,1.87); g.add(arch);
+});
+place('busstop','Bus Stop','Catch the green buses here. They run along the high street every few minutes.','Transport',-1.5,NZ,false,g=>{
+  box(3,0.12,1.4,0x6d7b8c,0,2.4,0.4,g);
+  box(0.12,2.4,0.12,0x6d7b8c,-1.4,0,1,g); box(0.12,2.4,0.12,0x6d7b8c,1.4,0,1,g);
+  box(3,2.2,0.08,0xbfe0f0,0,0.2,-0.2,g);
+  box(2.4,0.15,0.5,0x8a6a4a,0,0.6,0.2,g);
+  person(0x2a63b8,0.6,0.6,g); person(0xe8a33d,-0.7,0.5,g);
+});
+place('busstation','Bus Station','The main bus station — buses leave here for other towns and cities.','Transport',6,NZ,false,g=>{
+  box(9,5,6,0xc8d3df,0,0,0,g);
+  box(9.2,0.3,6.2,0x9fb0c2,0,5,0,g);
+  const s=sign('BUS STATION',6,0.9,'#c8d3df','#2b3a4a'); s.position.set(0,4.2,3.02); g.add(s);
+  for(let i=0;i<7;i++) box(0.12,3,0.1,0x8193a6,-3.6+i*1.2,0.5,3.03,g);
+  box(3,2.4,0.1,0x4c5a6c,2.5,0,3.03,g);
+});
+place('cafe','Café','A friendly café with a yellow sign. Sit outside under the umbrella for coffee and cake.','Food & drink',15,NZ,false,g=>{
+  box(5,6.5,5,0xe0623e,0,0,0,g);
+  gable(5,1.8,5,0x3e6fa3,6.5,g);
+  box(1.4,1.2,1.4,0xe0623e,1.2,6.5,0,g);
+  const s=sign('Café',4.2,0.9,'#f4d35e','#d9473b','italic bold'); s.position.set(0,3.2,2.56); g.add(s);
+  windows(g,{w:5,d:5,cols:2,rows:1,y0:4.6,dy:0,c:0xfff8ec});
+  box(1.2,2.4,0.1,0x2b3a4a,-1.2,0,2.53,g); box(1.4,1.6,0.1,0xfff8ec,1,0.7,2.53,g);
+  // terrace
+  cyl(0.6,0.6,0.08,0xffffff,1.5,0.8,4.1,g); cyl(0.06,0.06,0.8,0x555555,1.5,0,4.1,g);
+  const um=new THREE.Mesh(new THREE.ConeGeometry(1.4,0.7,8),mat(0xf4d35e)); um.position.set(1.5,2.6,4.1); um.castShadow=true; g.add(um);
+  cyl(0.04,0.04,2.3,0x555555,1.5,0,4.1,g);
+  person(0x3a7d5c,0.5,4.2,g); person(0xe85d75,2.5,4.3,g);
+});
+place('bank','Bank','Keep your money safe here. The bank has a cash machine by the front door.','Services',24,NZ,false,g=>{
+  box(7,7,5.5,0xdc6a5c,0,0,0,g);
+  gable(7,2,5.5,0x6d84a6,7,g);
+  [-2,2].forEach(x=>{box(1.4,1.2,1.2,0xf0e6dc,x,7.4,1.6,g);});
+  box(7.2,0.3,0.4,0xf0e6dc,0,7,2.85,g);
+  const s=sign('BANK',3.4,0.7,'#f0e6dc','#6d84a6'); s.position.set(0,5.3,2.77); g.add(s);
+  windows(g,{w:7,d:5.5,cols:3,rows:1,y0:3.4,dy:0,c:0xfff8ec,ww:1,wh:1.3});
+  box(1.6,2.6,0.1,0x2b3a4a,-1.5,0,2.77,g);
+  [ -0.3, 0.3].forEach(dx=>box(0.9,1.8,0.1,0xfff8ec,2+dx*3,0.6,2.77,g));
+});
+// parked cars beside the bank
+[0xffffff,0x2f6b4f,0x2b3a4a,0x3e6fa3].forEach((c,i)=>{ const car=makeCar(c); car.position.set(19.6,0,-11+i*2.2); car.rotation.y=Math.PI/2; scene.add(car); });
+place('library','Library','Borrow books, use the computers, or study in a quiet room.','Learning',-24,SZ,false,g=>{
+  box(9,5.6,6,0xe07a6a,0,0,0,g);
+  box(9.6,1.2,6.6,0x2f5965,0,5.6,0,g);
+  const s=sign('LIBRARY',6,1,'#e9eef5','#3a4fb0'); s.position.set(0,2.9,3.02); g.add(s);
+  windows(g,{w:9,d:6,cols:5,rows:1,y0:4.1,dy:0});
+  [-3.4,3.4].forEach(x=>box(1.2,1.4,0.1,0xffffff,x,0.8,3.02,g));
+  box(1.6,2.2,0.1,0x2b3a4a,0,0,3.02,g);
+});
+place('market','Market Square','An open-air market with fruit, vegetables, clothes and gifts on striped stalls.','Shopping',-6,SZ,false,g=>{
+  const sq=box(22,0.08,10,0xe8c9a8,0,0,0,g); sq.receiveShadow=true;
+  const stripe=(()=>{const cv=document.createElement('canvas');cv.width=64;cv.height=8;const x=cv.getContext('2d');for(let i=0;i<8;i++){x.fillStyle=i%2?'#ffffff':'#2f7d55';x.fillRect(i*8,0,8,8);}const t=new THREE.CanvasTexture(cv);t.colorSpace=THREE.SRGBColorSpace;return new THREE.MeshLambertMaterial({map:t});})();
+  const goods=[0xe85d75,0xf6c445,0x7cc4a6,0xe07a3e,0x8e6cc4];
+  [[-6,2],[1,-2.5],[7,1.5]].forEach(([x,z],k)=>{
+    box(3.4,1,1.4,0x3d8a6b,x,0,z,g);
+    goods.forEach((c,i)=>box(0.45,0.35,0.45,c,x-1.3+i*0.65,1,z,g));
+    [-1.6,1.6].forEach(dx=>cyl(0.05,0.05,2.4,0x555555,x+dx,0,z-0.6,g,6));
+    const aw=new THREE.Mesh(new THREE.BoxGeometry(3.8,0.15,2),stripe); aw.position.set(x,2.5,z-0.2); aw.rotation.x=0.15; aw.castShadow=true; g.add(aw);
+  });
+  box(0.9,1.4,0.15,0x2b2b2b,-2.2,0,-0.5,g); // chalk board
+  const cols=[0xd9473b,0x2a63b8,0x3a7d5c,0xe8a33d,0x6b4a8e,0x2b3a4a,0xe85d75];
+  [[-9,-3],[-3,3.5],[3.5,3.6],[-1,-0.8],[9.5,-3.2],[5,-3.5],[-8,4],[4,0.5]].forEach(([x,z],i)=>shoppers.push(person(cols[i%cols.length],x,z,g)));
+  // dog
+  const dog=box(0.8,0.4,0.35,0xf4f4f4,-6.2,0.3,-1.3,g); box(0.3,0.3,0.3,0x2b2b2b,-5.7,0.65,-1.3,g);
+});
+place('park','Park','Green grass, a big oak tree and a bench — a quiet place to relax or have a picnic.','Nature',20,SZ,false,g=>{
+  const grass=box(20,0.1,10,0x5fa046,0,0,0,g); grass.receiveShadow=true;
+  // hedge border
+  box(20,0.6,0.3,0x8a5a3a,0,0,-5,g); box(0.3,0.6,10,0x8a5a3a,-10,0,0,g);
+  // path
+  const pth=new THREE.Mesh(new THREE.PlaneGeometry(1.4,13),mat(0xf2f2ee)); pth.rotation.set(-Math.PI/2,0,0.75); pth.position.set(-3,0.12,0); g.add(pth);
+  tree(4,1,1.6,g); tree(-7,3,0.9,g); tree(8,-3,1.1,g);
+  box(2,0.15,0.6,0x8a5a3a,1,0.5,-3.8,g); box(2,0.6,0.12,0x8a5a3a,1,0.6,-4.15,g);
+  [-0.8,0.8].forEach(dx=>box(0.12,0.5,0.5,0x5a3a22,1+dx,0,-3.8,g));
+});
+
+// ---------- extras: trees, moving traffic ----------
+[[-30,-12],[-31,6],[31,-4],[29,16],[-13,15],[11,-13]].forEach(([x,z])=>tree(x,z,0.8));
+const traffic=[];
+const b1=makeBus(); b1.position.set(-20,0,-1.2); scene.add(b1); traffic.push({o:b1,v:5,lane:-1.2});
+const b2=makeBus(); b2.position.set(12,0,1.2); b2.rotation.y=Math.PI; scene.add(b2); traffic.push({o:b2,v:-4,lane:1.2});
+const c1=makeCar(0xd9473b); c1.position.set(0,0,-1.2); scene.add(c1); traffic.push({o:c1,v:7,lane:-1.2});
+const c2=makeCar(0xffffff); c2.position.set(-5,0,1.2); c2.rotation.y=Math.PI; scene.add(c2); traffic.push({o:c2,v:-6,lane:1.2});
+// parked buses at bus stop (as in the picture)
+const pb=makeBus(); pb.position.set(-1.5,0,-12.6); scene.add(pb);
+
+// ---------- UI ----------
+const bar=document.getElementById('bar');
+const info=document.getElementById('info'), iname=document.getElementById('iname'), idesc=document.getElementById('idesc'), itag=document.getElementById('itag');
+const tip=document.getElementById('tip');
+const chips={};
+const all=document.createElement('button'); all.className='chip'; all.textContent='⟲ Overview'; all.onclick=()=>select(null); bar.appendChild(all);
+places.forEach(p=>{ const b=document.createElement('button'); b.className='chip'; b.textContent=p.name; b.onclick=()=>select(p); bar.appendChild(b); chips[p.id]=b; });
+document.getElementById('close').onclick=()=>select(null);
+
+// fly-to camera animation
+let fly=null;
+function flyTo(pos,target){ fly={ t:0, p0:camera.position.clone(), t0:controls.target.clone(), p1:pos, t1:target }; }
+
+let selected=null;
+function setGlow(p,on,col){ if(!p) return; p.group.traverse(o=>{ if(o.isMesh && o.material.emissive){ if(on){ if(!o.userData.own){ o.material=o.material.clone(); o.userData.own=true; } o.material.emissive.setHex(col); } else if(o.userData.own) o.material.emissive.setHex(0); } }); }
+function select(p){
+  if(selected) setGlow(selected,false);
+  Object.values(chips).forEach(c=>c.classList.remove('on'));
+  selected=p;
+  if(!p){ info.classList.add('hidden'); flyTo(HOME.pos.clone(),HOME.target.clone()); return; }
+  setGlow(p,true,0x332200);
+  chips[p.id].classList.add('on');
+  iname.textContent=p.name; idesc.textContent=p.desc; itag.textContent=p.tag; info.classList.remove('hidden');
+  const bb=new THREE.Box3().setFromObject(p.group), c=bb.getCenter(new THREE.Vector3()), size=bb.getSize(new THREE.Vector3()).length();
+  flyTo(new THREE.Vector3(c.x+size*0.35, c.y+size*0.7, c.z+size*1.2), c); // fronts face +z
+}
+
+// picking
+const ray=new THREE.Raycaster(), mouse=new THREE.Vector2();
+const pickables=()=>places.map(p=>p.group);
+function pick(e){ const r=renderer.domElement.getBoundingClientRect(); mouse.set(((e.clientX-r.left)/r.width)*2-1, -((e.clientY-r.top)/r.height)*2+1); ray.setFromCamera(mouse,camera); const h=ray.intersectObjects(pickables(),true)[0]; return h?h.object.userData.place:null; }
+let hovered=null, down=null;
+renderer.domElement.addEventListener('pointermove',e=>{
+  if(e.pointerType!=='mouse') return;
+  const p=pick(e);
+  if(p!==hovered){ if(hovered&&hovered!==selected) setGlow(hovered,false); hovered=p; if(p&&p!==selected) setGlow(p,true,0x1a1a1a); }
+  renderer.domElement.style.cursor=p?'pointer':'grab';
+  if(p){ tip.style.display='block'; tip.textContent=p.name; tip.style.left=e.clientX+'px'; tip.style.top=e.clientY+'px'; } else tip.style.display='none';
+});
+renderer.domElement.addEventListener('pointerdown',e=>down={x:e.clientX,y:e.clientY});
+renderer.domElement.addEventListener('pointerup',e=>{ if(!down) return; const moved=Math.hypot(e.clientX-down.x,e.clientY-down.y); down=null; if(moved>5) return; const p=pick(e); if(p) select(p); });
+addEventListener('keydown',e=>{ if(e.key==='Escape') select(null); });
+addEventListener('resize',()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); fitHome(); });
+function fitHome(){ const k=Math.min(2.6,Math.max(1,1.5/camera.aspect)); HOME.pos.set(0,34*k,46*k); scene.fog.near=60*k; scene.fog.far=140*k; }
+fitHome(); camera.position.copy(HOME.pos);
+
+// ---------- loop ----------
+const clock=new THREE.Clock();
+renderer.setAnimationLoop(()=>{
+  const dt=Math.min(clock.getDelta(),0.05), t=clock.elapsedTime;
+  traffic.forEach(v=>{ v.o.position.x+=v.v*dt; if(v.o.position.x>33) v.o.position.x=-33; if(v.o.position.x<-33) v.o.position.x=33; });
+  shoppers.forEach((s,i)=>{ s.position.y=Math.abs(Math.sin(t*3+i))*0.08; s.rotation.y=Math.sin(t*0.5+i)*1.2; });
+  if(fly){ fly.t=Math.min(1,fly.t+dt/1.1); const k=1-Math.pow(1-fly.t,3); camera.position.lerpVectors(fly.p0,fly.p1,k); controls.target.lerpVectors(fly.t0,fly.t1,k); if(fly.t>=1) fly=null; }
+  controls.update();
+  renderer.render(scene,camera);
+});
+window.__ready=true;
+</script>
+</body>
+</html>
